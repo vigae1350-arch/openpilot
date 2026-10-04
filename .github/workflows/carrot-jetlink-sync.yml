@@ -1,0 +1,65 @@
+# carrot-jetlink: keep the phone-link branch (carrot-jetlink) up to date with
+# ajouatom/openpilot carrot-wip. First run creates the branch from the patch;
+# later runs merge new carrot-wip commits in. On a conflict nothing is pushed
+# and the run fails (you get an email); the comma keeps its last good version.
+name: carrot-jetlink sync
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 */6 * * *'   # every 6 hours
+
+permissions:
+  contents: write
+
+concurrency: carrot-jetlink-sync
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Sync carrot-jetlink with carrot-wip
+        env:
+          SYNC_TOKEN: ${{ secrets.SYNC_TOKEN }}
+          PATCH_URL: https://github.com/vigae1350-arch/jetlink_vigae1350/releases/download/v0.8.2-custom/carrot-jetlink.patch
+        run: |
+          [ -n "$SYNC_TOKEN" ] || { echo "::error::SYNC_TOKEN secret is missing (Settings > Secrets and variables > Actions)"; exit 1; }
+          export ORIGIN_URL="https://x-access-token:${SYNC_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          export UPSTREAM_URL="https://github.com/ajouatom/openpilot.git"
+          set -euo pipefail
+          FILTER="${FILTER---filter=blob:none}"
+          BASE=7432ac9b5c0cac7b92fdf8393c5dda4d2de9a99b
+          rm -rf repo && git init -q repo && cd repo
+          git config user.name carrot-jetlink-sync
+          git config user.email carrot-jetlink-sync@users.noreply.github.com
+          git remote add origin "$ORIGIN_URL"
+          git remote add upstream "$UPSTREAM_URL"
+          git fetch -q $FILTER ${FETCH_OPTS:-} upstream carrot-wip:refs/remotes/upstream/carrot-wip
+          if git ls-remote --exit-code --heads origin carrot-jetlink >/dev/null; then
+            git fetch -q $FILTER ${FETCH_OPTS:-} origin carrot-jetlink:refs/remotes/origin/carrot-jetlink
+            git checkout -q -b carrot-jetlink origin/carrot-jetlink
+            if git merge-base --is-ancestor upstream/carrot-wip HEAD; then echo "already up to date"; exit 0; fi
+            if ! git merge -q --no-edit -m "Merge ajouatom/openpilot carrot-wip" upstream/carrot-wip; then
+              git merge --abort || true
+              echo "::error::the new carrot-wip conflicts with the phone link; carrot-jetlink left as it was"
+              exit 1
+            fi
+          else
+            curl -fsSL -o /tmp/carrot-jetlink.patch "$PATCH_URL"
+            git checkout -q -b carrot-jetlink upstream/carrot-wip
+            if ! git apply --whitespace=nowarn --index /tmp/carrot-jetlink.patch; then
+              echo "patch does not apply to the newest carrot-wip; applying on $BASE and merging"
+              git fetch -q $FILTER ${FETCH_OPTS:-} upstream "$BASE"
+              git checkout -q -B carrot-jetlink "$BASE"
+              git apply --whitespace=nowarn --index /tmp/carrot-jetlink.patch
+              git commit -q -m "carrot-jetlink: phone link (jetlink v3) on carrot-wip"
+              git merge -q --no-edit -m "Merge ajouatom/openpilot carrot-wip" upstream/carrot-wip || { echo "::error::conflict"; exit 1; }
+            else
+              git commit -q -m "carrot-jetlink: phone link (jetlink v3) on carrot-wip"
+            fi
+          fi
+          python3 -m py_compile openpilot/selfdrive/modeld/modeld.py openpilot/system/manager/process_config.py \
+            openpilot/selfdrive/selfdrived/selfdrived.py openpilot/selfdrive/jetlink_adapter/__init__.py
+          git push -q origin carrot-jetlink
+          echo "pushed carrot-jetlink $(git rev-parse --short HEAD) on carrot-wip $(git rev-parse --short upstream/carrot-wip)"
