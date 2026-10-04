@@ -48,6 +48,7 @@ from __future__ import annotations
 import functools
 import json
 import os
+import sys
 import tempfile
 import threading
 from collections import namedtuple
@@ -68,6 +69,8 @@ FILE_KEYS = {KEYS.link: 'int', KEYS.progress: 'json', KEYS.spec: 'json', KEYS.po
 CHESTNUT_IDS = frozenset({(0xADD1, 0x0001), (0x3801, 0x0001), (0x174C, 0x2464), (0x174C, 0x2463)})
 
 WARP_DIR = Path(__file__).resolve().parent / 'models'
+BASE = Path(__file__).resolve().parents[3]          # the checkout
+JETLINK_ROOT = BASE / 'jetlink_repo'                # this jetlink (protocol v3), never carrot's vendored one
 OWNER_LOG = Path('/data/log/jetlink-owner.log')
 _AGNOS = os.path.isfile('/AGNOS')
 STATE_DIR: Path | None = None   # the failsafe's records; None: beside jetlink's keys
@@ -159,12 +162,37 @@ def warp_path(cam_w: int, cam_h: int, model_w: int, model_h: int) -> Path:
   return WARP_DIR / f'warp_{cam_w}x{cam_h}_{model_w}x{model_h}_tinygrad.pkl'
 
 
+def use_our_jetlink() -> None:
+  """Make `import jetlink` this checkout's jetlink. carrot's launcher puts
+  pydeps ahead of the checkout on PYTHONPATH and carrot vendors an older
+  jetlink of its own (third_party/jetlink), so either could answer first; a
+  jetlink already imported from elsewhere is dropped from this process."""
+  root = str(JETLINK_ROOT)
+  if sys.path[:1] != [root]:
+    while root in sys.path:
+      sys.path.remove(root)
+    sys.path.insert(0, root)
+  mod = sys.modules.get('jetlink')
+  where = os.path.realpath(getattr(mod, '__file__', None) or '/') if mod is not None else ''
+  if mod is not None and not where.startswith(os.path.realpath(root) + os.sep):
+    for name in [n for n in sys.modules if n == 'jetlink' or n.startswith('jetlink.')]:
+      del sys.modules[name]
+
+
+def child_pythonpath() -> str:
+  """PYTHONPATH for jetlink's child processes (the provisioning run, the warp
+  build): this jetlink first, then the checkout and carrot's pydeps."""
+  parts = [str(JETLINK_ROOT), str(BASE), str(BASE / 'pydeps')]
+  parts += [p for p in os.environ.get('PYTHONPATH', '').split(os.pathsep) if p and p not in parts]
+  return os.pathsep.join(parts)
+
+
 def owner_config():
+  use_our_jetlink()
   from jetlink.openpilot.interface import Keys, OwnerConfig
 
-  from openpilot.common.basedir import BASEDIR
   return OwnerConfig(params_dir=_params_dir(), keys=Keys(**_keys()), chestnut_ids=CHESTNUT_IDS,
-                     adapter=__name__, cwd=Path(BASEDIR), env={'PYTHONPATH': BASEDIR}, log_file=OWNER_LOG)
+                     adapter=__name__, cwd=BASE, env={'PYTHONPATH': child_pythonpath()}, log_file=OWNER_LOG)
 
 
 # -- the owner's failsafe and the warp build ----------------------------------
@@ -255,7 +283,7 @@ def _build_warp_when_offroad() -> None:
   while not _offroad():
     time.sleep(30)
   cmd = [sys.executable, '-m', 'openpilot.selfdrive.jetlink_adapter.build_warp', '--force']
-  env = dict(os.environ, PYTHONPATH=BASEDIR)
+  env = dict(os.environ, PYTHONPATH=child_pythonpath())
   try:
     OWNER_LOG.parent.mkdir(parents=True, exist_ok=True)
     with open(OWNER_LOG, 'a') as log:
@@ -282,6 +310,7 @@ def main() -> None:
     pass
   threading.Thread(target=_mark_stable, name='jetlink-stable', daemon=True).start()
   threading.Thread(target=_build_warp_when_offroad, name='jetlink-warp', daemon=True).start()
+  use_our_jetlink()
   from jetlink.openpilot.owner import main as run_owner
   run_owner(owner_config())
 
@@ -296,6 +325,7 @@ class Adapter:
   catalog_selector = 0   # no model manager
 
   def __init__(self):
+    use_our_jetlink()
     from jetlink.openpilot.interface import Keys
 
     from openpilot.common.basedir import BASEDIR
@@ -508,6 +538,7 @@ def _api():
 
 def _bind():
   try:
+    use_our_jetlink()
     import jetlink
     if getattr(jetlink, '__file__', None) is None:
       return _Absent(None)

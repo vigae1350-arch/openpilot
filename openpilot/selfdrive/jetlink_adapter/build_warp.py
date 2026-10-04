@@ -18,6 +18,7 @@ def main() -> int:
   args = p.parse_args()
 
   from openpilot.selfdrive import jetlink_adapter as ja
+  ja.use_our_jetlink()
   op = ja.adapter()
   cam_w, cam_h, model_w, model_h = op.camera()
   out = ja.warp_path(cam_w, cam_h, model_w, model_h)
