@@ -77,6 +77,13 @@ _AGNOS = os.path.isfile('/AGNOS')
 STATE_DIR: Path | None = None   # the failsafe's records; None: beside jetlink's keys
 STABLE_AFTER_S = 120     # a boot the owner survives this long is a good boot
 FAILSAFE_BOOTS = 3       # this many short boots in a row turn the phone link off
+# How long a frame waits for the phone's reply before modeld publishes the
+# previous output again (jetlink.openpilot.model_state.HOLD_FRAME, 46 ms
+# upstream). A Galaxy Fold7 answers in about 46.5 ms with the comma's own warp
+# and send, so every frame held at 46; 48 lets those through and still leaves
+# the 50 ms frame. A phone that falls further behind is still handed back by
+# jetlink's own hold, lag and drop rules.
+HOLD_FRAME_S = 0.048
 
 
 def _op_params_dir() -> Path:
@@ -686,12 +693,20 @@ def prepare() -> bool:
   return phone_mode() and _api().prepare()
 
 
+def tune_hold() -> None:
+  """carrot-jetlink's HOLD_FRAME_S for this process's large model."""
+  use_our_jetlink()
+  from jetlink.openpilot import model_state
+  model_state.HOLD_FRAME = HOLD_FRAME_S
+
+
 @_guarded(None)
 def attach(small, cam_w: int, cam_h: int):
   """modeld, once the camera is up and carrot's small ModelState is built:
   the model to run (small driving until the link has joined), or None."""
   if not phone_mode():
     return None
+  tune_hold()
   wrapped = SmallModel(small)
   joined = _api().attach(wrapped, cam_w, cam_h)
   # attach() hands the small model back when the joining model could not be built
