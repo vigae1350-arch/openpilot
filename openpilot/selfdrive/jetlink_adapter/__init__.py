@@ -28,9 +28,13 @@ What differs from zoompilot:
 - carrot has no sunnypilot model manager, so there is no big-model pick or
   catalog: jetlink runs its own default large model (Cinque Terre V3, the one
   carrot's eGPU runs), fetched from comma's public LFS.
-- carrot's Params registry does not declare jetlink's keys, so they live as
-  plain files in the params directory, written the way params.cc writes them
-  (temp file, fsync, rename). Nothing native needs rebuilding.
+- carrot's Params registry does not declare jetlink's keys, and manager's
+  Params.clear_all deletes every undeclared file in the params directory at
+  each start and each onroad/offroad change. So jetlink's own keys live as
+  plain files in a directory of their own beside it, /data/params/jetlink-phone,
+  written the way params.cc writes them (temp file, fsync, rename); IsOffroad
+  is read from openpilot's params directory. Nothing native needs rebuilding.
+  Switch the phone link with: python3 -m openpilot.selfdrive.jetlink_adapter on|off|status
 - carrot's eGPU (comma's chestnut board on the USB-C port) plays chestnut's
   part: while one is fitted the link stays off.
 - carrot's ModelState.run takes prepare_only where jetlink passes
@@ -57,7 +61,7 @@ _Keys = namedtuple('_Keys', 'link offroad progress spec pointers big_model catal
 KEYS = _Keys(link='JetlinkLink', offroad='IsOffroad', progress='AcceleratorProgress', spec='JetlinkSpec',
              pointers='JetlinkModelPointers', big_model=None, catalog=None)
 
-# keys carrot's params_keys.h does not declare: kept as files by this module
+# keys carrot's params_keys.h does not declare: kept as files in _params_dir()
 FILE_KEYS = {KEYS.link: 'int', KEYS.progress: 'json', KEYS.spec: 'json', KEYS.pointers: 'json'}
 
 # comma's chestnut, running and in its ROM: carrot's eGPU (modeld.helpers.USBGPU_USB_IDS)
@@ -66,17 +70,34 @@ CHESTNUT_IDS = frozenset({(0xADD1, 0x0001), (0x3801, 0x0001), (0x174C, 0x2464), 
 WARP_DIR = Path(__file__).resolve().parent / 'models'
 OWNER_LOG = Path('/data/log/jetlink-owner.log')
 _AGNOS = os.path.isfile('/AGNOS')
-STATE_DIR = Path('/data/jetlink-phone') if _AGNOS else Path(os.environ.get('HOME', '/tmp')) / '.comma' / 'jetlink-phone'
+STATE_DIR: Path | None = None   # the failsafe's records; None: beside jetlink's keys
 STABLE_AFTER_S = 120     # a boot the owner survives this long is a good boot
 FAILSAFE_BOOTS = 3       # this many short boots in a row turn the phone link off
 
 
-def _params_dir() -> Path:
+def _op_params_dir() -> Path:
+  """openpilot's params directory (Params' own files: IsOffroad and the rest)."""
   prefix = os.environ.get('OPENPILOT_PREFIX', '')
   root = os.environ.get('PARAMS_ROOT')
   if root is None:
     root = '/data/params' if _AGNOS else os.path.join(os.environ.get('HOME', ''), '.comma' + prefix, 'params')
   return Path(root) / os.environ.get('OPENPILOT_PREFIX', 'd')
+
+
+def _params_dir() -> Path:
+  """jetlink's own key files: beside openpilot's params directory, never in it,
+  where Params.clear_all would delete them."""
+  return _op_params_dir().parent / 'jetlink-phone'
+
+
+def _state_dir() -> Path:
+  return STATE_DIR if STATE_DIR is not None else _params_dir()
+
+
+def _keys() -> dict:
+  """jetlink's key names. jetlink reads the link and IsOffroad off one
+  directory, so IsOffroad is named by its path relative to ours."""
+  return dict(KEYS._asdict(), offroad=os.path.relpath(_op_params_dir() / 'IsOffroad', _params_dir()))
 
 
 def _file_get(key: str):
@@ -142,7 +163,7 @@ def owner_config():
   from jetlink.openpilot.interface import Keys, OwnerConfig
 
   from openpilot.common.basedir import BASEDIR
-  return OwnerConfig(params_dir=_params_dir(), keys=Keys(**KEYS._asdict()), chestnut_ids=CHESTNUT_IDS,
+  return OwnerConfig(params_dir=_params_dir(), keys=Keys(**_keys()), chestnut_ids=CHESTNUT_IDS,
                      adapter=__name__, cwd=Path(BASEDIR), env={'PYTHONPATH': BASEDIR}, log_file=OWNER_LOG)
 
 
@@ -157,17 +178,18 @@ def _boot_id() -> str:
 
 def _read_state() -> dict:
   try:
-    state = json.loads((STATE_DIR / 'boots.json').read_text())
+    state = json.loads((_state_dir() / 'boots.json').read_text())
     return state if isinstance(state, dict) else {}
   except (OSError, ValueError):
     return {}
 
 
 def _write_state(state: dict) -> None:
-  STATE_DIR.mkdir(parents=True, exist_ok=True)
-  tmp = STATE_DIR / 'boots.json.tmp'
+  directory = _state_dir()
+  directory.mkdir(parents=True, exist_ok=True)
+  tmp = directory / 'boots.json.tmp'
   tmp.write_text(json.dumps(state))
-  os.replace(tmp, STATE_DIR / 'boots.json')
+  os.replace(tmp, directory / 'boots.json')
 
 
 def failsafe_tripped() -> bool:
@@ -182,7 +204,7 @@ def failsafe_tripped() -> bool:
   if len(short) >= FAILSAFE_BOOTS:
     _file_put(KEYS.link, 0)
     _write_state({'short': [], 'tripped': boot})
-    (STATE_DIR / 'FAILSAFE').write_text(f"phone link turned off after {FAILSAFE_BOOTS} short boots in a row\n")
+    (_state_dir() / 'FAILSAFE').write_text(f"phone link turned off after {FAILSAFE_BOOTS} short boots in a row\n")
     return True
   _write_state({'short': short})
   return False
@@ -209,7 +231,7 @@ def _tinygrad_stamp() -> str:
 
 def _offroad() -> bool:
   try:
-    return (_params_dir() / KEYS.offroad).read_bytes().strip() in (b'1', b'')
+    return (_op_params_dir() / 'IsOffroad').read_bytes().strip() in (b'1', b'')
   except OSError:
     return True
 
@@ -252,6 +274,7 @@ def main() -> None:
   if not phone_mode():
     return
   try:
+    _params_dir().mkdir(parents=True, exist_ok=True)   # jetlink reads IsOffroad through it
     if failsafe_tripped():
       _log_failure("phone link turned off by the failsafe (short boots in a row)", None)
       return
@@ -277,9 +300,13 @@ class Adapter:
 
     from openpilot.common.basedir import BASEDIR
     from openpilot.common.swaglog import cloudlog
-    self.keys = Keys(**KEYS._asdict())
+    self.keys = Keys(**_keys())
     self.log = cloudlog
     self.basedir = Path(BASEDIR)
+    try:
+      _params_dir().mkdir(parents=True, exist_ok=True)
+    except OSError:
+      pass
     self._stores: dict[Path, object] = {}
 
   # -- params ---------------------------------------------------------------
@@ -295,9 +322,13 @@ class Adapter:
       store = self._stores[where] = Params()
     return store
 
+  def _op_key(self, key: str) -> str:
+    return 'IsOffroad' if key == self.keys.offroad else key
+
   def get(self, key: str):
     if key is None:
       return None
+    key = self._op_key(key)
     if key in FILE_KEYS:
       return _file_get(key)
     try:
@@ -306,12 +337,14 @@ class Adapter:
       return None
 
   def put(self, key: str, value, *, block: bool = False) -> None:
+    key = self._op_key(key)
     if key in FILE_KEYS:
       _file_put(key, value)
       return
     self._params().put(key, value)
 
   def remove(self, key: str) -> None:
+    key = self._op_key(key)
     if key in FILE_KEYS:
       _file_remove(key)
       return
@@ -560,3 +593,29 @@ def attach(small, cam_w: int, cam_h: int):
   joined = _api().attach(wrapped, cam_w, cam_h)
   # attach() hands the small model back when the joining model could not be built
   return None if joined is None or joined is wrapped else CarrotModel(joined)
+
+
+def _cli(argv: list[str]) -> int:
+  """python3 -m openpilot.selfdrive.jetlink_adapter on|off|status"""
+  cmd = argv[0] if argv else 'status'
+  if cmd in ('on', 'off'):
+    _file_put(KEYS.link, 1 if cmd == 'on' else 0)
+    if cmd == 'on':
+      for name in ('boots.json', 'FAILSAFE'):
+        try:
+          (_state_dir() / name).unlink()
+        except OSError:
+          pass
+    print(f"phone link {cmd}. Reboot to apply (sudo reboot).")
+    return 0
+  if cmd == 'status':
+    print(f"phone link: {'on' if phone_mode() else 'off'}  ({_params_dir() / KEYS.link})")
+    if (_state_dir() / 'FAILSAFE').exists():
+      print("failsafe: tripped -> " + (_state_dir() / 'FAILSAFE').read_text().strip())
+    warps = sorted(WARP_DIR.glob('warp_*.pkl'))
+    print(f"warp: {warps[0].name if warps else 'not built yet'}")
+    print(f"log: {OWNER_LOG}")
+    return 0
+  print(_cli.__doc__)
+  return 2
+
