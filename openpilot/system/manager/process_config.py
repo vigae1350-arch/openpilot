@@ -6,6 +6,10 @@ from openpilot.cereal import car
 from openpilot.common.params import Params
 from openpilot.system.hardware import PC, TICI
 from openpilot.system.manager.process import PythonProcess, NativeProcess, DaemonProcess
+try:
+  from openpilot.selfdrive import jetlink_adapter   # carrot-jetlink: phone link, guarded
+except Exception:
+  jetlink_adapter = None
 
 try:
   BODYTELEOP_AVAILABLE = importlib.util.find_spec("openpilot.tools.bodyteleop.web") is not None
@@ -154,7 +158,10 @@ procs = [
   PythonProcess("timed", "openpilot.system.timed", always_run, enabled=not PC),
 
   PythonProcess("modeld", "openpilot.selfdrive.modeld.modeld", only_onroad),
-  PythonProcess("jetlinkd", "openpilot.selfdrive.modeld.jetlink.daemon", always_run, enabled=TICI, restart_if_crash=True),
+  # carrot-jetlink: carrot's own Jetson/Mac link stands down while the phone link is on
+  PythonProcess("jetlinkd", "openpilot.selfdrive.modeld.jetlink.daemon",
+                and_(always_run, jetlink_adapter.carrot_link_allowed) if jetlink_adapter is not None else always_run,
+                enabled=TICI, restart_if_crash=True),
   PythonProcess("dmonitoringmodeld", "openpilot.selfdrive.modeld.dmonitoringmodeld", enable_dm_model, enabled=(WEBCAM or not PC)),
   PythonProcess("sensord", "openpilot.system.sensord.sensord", only_onroad, enabled=not PC),
   PythonProcess("ui", "openpilot.selfdrive.ui.ui", always_run, restart_if_crash=True),
@@ -210,6 +217,11 @@ procs = [
 
   # C3x lite has no speaker; mirror alerts to the GPIO buzzer instead.
   PythonProcess("beep", "openpilot.selfdrive.controls.beep", c3x_lite, enabled=TICI),
+
+  # carrot-jetlink: the USB gadget owner for a phone running the large model,
+  # only while the phone link is on. Runs onroad too: a gadget whose owner exits leaves the bus
+  *([PythonProcess(jetlink_adapter.OWNER, jetlink_adapter.__name__, and_(always_run, jetlink_adapter.should_run),
+                   enabled=TICI, restart_if_crash=True)] if jetlink_adapter is not None else []),
 ]
 
 managed_processes = {p.name: p for p in procs}

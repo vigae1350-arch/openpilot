@@ -30,6 +30,10 @@ from openpilot.selfdrive.modeld.constants import ModelConstants, Plan
 from openpilot.selfdrive.modeld.helpers import (get_tg_input_devices, load_oob, modeld_pkl_path,
                                                 refresh_usbgpu_device_cache, select_vision_streams, usbgpu_compiled_path,
                                                 usbgpu_pcie_not_ready, usbgpu_present, wait_for_usbgpu_present)
+try:
+  from openpilot.selfdrive import jetlink_adapter   # carrot-jetlink: phone link, guarded
+except Exception:
+  jetlink_adapter = None
 
 PROCESS_NAME = "openpilot.selfdrive.modeld.modeld"
 SEND_RAW_PRED = os.getenv('SEND_RAW_PRED')
@@ -240,6 +244,11 @@ def main(demo=False):
     queue_usbgpu_error_tmux(params, "USB present but eGPU model unavailable at startup")
   use_wide_camera = bool(params.get("UseWideCamera", return_default=True))
 
+  # carrot-jetlink: before going realtime, prepare() starts tinygrad's device
+  # thread, which would otherwise inherit FIFO 54 on core 7. Never beside an eGPU
+  if not USBGPU and jetlink_adapter is not None:
+    jetlink_adapter.prepare()
+
   config_realtime_process(7, 54)
 
   # visionipc clients
@@ -322,11 +331,21 @@ def main(demo=False):
   # Keep the existing eGPU selection unchanged. A separate USB owner handles
   # external computers and late server startup through the pinned Jetlink model.
   if not USBGPU and os.path.isfile('/AGNOS'):
-    try:
-      from openpilot.selfdrive.modeld.jetlink.model import JoiningModel
-      model = JoiningModel(model, vipc_client_main.width, vipc_client_main.height)
-    except Exception:
-      cloudlog.exception('Jetlink camera adapter unavailable; retaining internal model')
+    # carrot-jetlink: with the phone link on, the phone's large model joins in
+    # the background instead (small model drives until then and whenever the
+    # link drops); carrot's Jetson link stands down. Off: carrot as shipped
+    phone_link = jetlink_adapter is not None and jetlink_adapter.phone_mode()
+    joined = jetlink_adapter.attach(small_model, vipc_client_main.width, vipc_client_main.height) \
+      if phone_link and model is small_model and small_model is not None else None
+    if joined is not None:
+      model = joined
+      cloudlog.warning("jetlink: phone joining model attached, small model drives until the link joins")
+    elif not phone_link:
+      try:
+        from openpilot.selfdrive.modeld.jetlink.model import JoiningModel
+        model = JoiningModel(model, vipc_client_main.width, vipc_client_main.height)
+      except Exception:
+        cloudlog.exception('Jetlink camera adapter unavailable; retaining internal model')
   # Loading is not complete until the first model result is published. The
   # first eGPU execution can spend several seconds initializing queues/kernels
   # after the PKL has loaded; clearing this here causes a false commIssue while
@@ -463,20 +482,27 @@ def main(demo=False):
     try:
       model_output = model.run(bufs, transforms, inputs, prepare_only)
     except Exception:
-      if not params.get_bool("UsbGpuActive") or small_model is None:
-        raise
-      cloudlog.exception("eGPU model failed, falling back to internal GPU")
-      queue_usbgpu_error_tmux(params, "runtime model execution failed")
-      params.put_bool("UsbGpuActive", False)
-      params.put_bool("UsbGpuStartupFailed", True)
-      params.put_bool("UsbGpuLoading", False)
-      usbgpu_startup_pending = False
-      model = small_model
-      run_count = 0
-      # Run the already-loaded internal model for this same camera frame. A
-      # missing modelV2 frame during fallback can otherwise cascade into a
-      # misleading communication/CAN error while selfdrived waits for modeld.
-      model_output = model.run(bufs, transforms, inputs, prepare_only)
+      if jetlink_adapter is not None and isinstance(model, jetlink_adapter.CarrotModel) and small_model is not None:
+        # never lose modeld over the link: the small model drives from this frame
+        cloudlog.exception("jetlink: joining model failed, small model drives for the rest of this drive")
+        model = small_model
+        run_count = 0
+        model_output = model.run(bufs, transforms, inputs, prepare_only)
+      else:
+        if not params.get_bool("UsbGpuActive") or small_model is None:
+          raise
+        cloudlog.exception("eGPU model failed, falling back to internal GPU")
+        queue_usbgpu_error_tmux(params, "runtime model execution failed")
+        params.put_bool("UsbGpuActive", False)
+        params.put_bool("UsbGpuStartupFailed", True)
+        params.put_bool("UsbGpuLoading", False)
+        usbgpu_startup_pending = False
+        model = small_model
+        run_count = 0
+        # Run the already-loaded internal model for this same camera frame. A
+        # missing modelV2 frame during fallback can otherwise cascade into a
+        # misleading communication/CAN error while selfdrived waits for modeld.
+        model_output = model.run(bufs, transforms, inputs, prepare_only)
     mt2 = time.perf_counter()
     inference_cpu_ms = (time.thread_time() - inference_cpu_start) * 1000
     model_execution_time = mt2 - mt1
