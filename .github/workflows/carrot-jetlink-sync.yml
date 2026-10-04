@@ -46,6 +46,36 @@ jobs:
             echo "::error::the phone-link patch does not apply to the newest carrot-wip ($(git rev-parse --short upstream/carrot-wip)); carrot-jetlink left as it was. Ask for an updated patch."
             exit 1
           fi
+          # fixes made after the release's patch, applied on top of it (skipped once the patch has them)
+          python3 - <<'PY'
+          import pathlib
+
+          def fix(path, old, new):
+            p = pathlib.Path(path)
+            s = p.read_text()
+            if new in s:
+              return
+            assert s.count(old) == 1, (path, old[:50])
+            p.write_text(s.replace(old, new))
+
+          A = 'openpilot/selfdrive/jetlink_adapter/__init__.py'
+          fix(A, "  def __init__(self, model):\n    object.__setattr__(self, '_model', model)\n",
+              "  # what jetlink's joining model reads off the small one that carrot's\n"
+              "  # ModelState does not carry (sunnypilot's does); jetlink's own defaults\n"
+              "  DEFAULTS = {'lat_delay': 0.0, 'PLANPLUS_CONTROL': 1.0, 'frame_drop_ratio': 0.0}\n\n"
+              "  def __init__(self, model):\n    object.__setattr__(self, '_model', model)\n")
+          fix(A, "  def __getattr__(self, name):\n    return getattr(self._model, name)\n",
+              "  def __getattr__(self, name):\n    try:\n      return getattr(self._model, name)\n"
+              "    except AttributeError:\n      if name in SmallModel.DEFAULTS:\n"
+              "        return SmallModel.DEFAULTS[name]\n      raise\n")
+          M = 'openpilot/selfdrive/modeld/modeld.py'
+          fix(M, "    mt1 = time.perf_counter()\n    camera_age_at_run_ms",
+              "    if jetlink_adapter is not None and isinstance(model, jetlink_adapter.CarrotModel):\n"
+              "      # carrot-jetlink: the joining model's lag rule reads modeld's frame drops\n"
+              "      model.frame_drop_ratio = frame_drop_ratio\n"
+              "    mt1 = time.perf_counter()\n    camera_age_at_run_ms")
+          PY
+          git add -A
           python3 -m py_compile openpilot/selfdrive/modeld/modeld.py openpilot/system/manager/process_config.py \
             openpilot/selfdrive/selfdrived/selfdrived.py openpilot/selfdrive/jetlink_adapter/__init__.py
           tree=$(git write-tree)
