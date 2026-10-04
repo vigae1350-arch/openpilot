@@ -45,7 +45,7 @@ def _fresh(path, now):
   return {}
 
 
-def diagnostics():
+def _diagnostics():
   """Only current telemetry can report health or an address; HELLO is identity."""
   now = time.monotonic()
   saved = _read(LINK_STATUS)
@@ -96,12 +96,12 @@ def diagnostics():
   return result
 
 
-def badge():
+def _badge():
   now = time.monotonic()
   link = _fresh(LINK_STATUS, now)
   model = _fresh(MODEL_STATUS, now)
   label = host_label(link.get('peer'))
-  health = diagnostics()
+  health = _diagnostics()
   if health:
     label = health['label']
     if health['state'] == 'waiting' and health['severity'] == 'unknown':
@@ -122,3 +122,24 @@ def badge():
   if state == 'retrying':
     return f'{label} RETRY', 'error'
   return None
+
+
+# carrot-jetlink: the phone link is shown as Jetlink, the way the Jetson link
+# was before it: JETLINK ON (driving on the phone's model), JETLINK READY,
+# JETLINK WAIT, and JETLINK on the web page's card
+PHONE, PHONE_SHOWN = 'PHONE', 'JETLINK'
+
+
+def diagnostics():
+  result = _diagnostics()
+  if result and result.get('label') == PHONE:
+    result['label'] = PHONE_SHOWN
+  return result
+
+
+def badge():
+  shown = _badge()
+  if shown and shown[0].split(' ')[0] == PHONE:
+    rest = shown[0][len(PHONE):]
+    return f'{PHONE_SHOWN}{rest or " ON"}', shown[1]
+  return shown

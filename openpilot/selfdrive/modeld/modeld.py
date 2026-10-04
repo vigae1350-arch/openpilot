@@ -482,6 +482,11 @@ def main(demo=False):
     mt1 = time.perf_counter()
     camera_age_at_run_ms = (time.monotonic() - meta_main.timestamp_eof * 1e-9) * 1000
     inference_cpu_start = time.thread_time()
+    # carrot-jetlink: the joining model counts the times the model that drives
+    # changes inside run(); the stall of a handover and the camera frames it
+    # drops are not lag (the frame-drop warm-up below starts again), or the
+    # first swap's own stall hands the large model straight back
+    handovers = getattr(model, 'handovers', 0)
     try:
       model_output = model.run(bufs, transforms, inputs, prepare_only)
     except Exception:
@@ -507,6 +512,9 @@ def main(demo=False):
         # misleading communication/CAN error while selfdrived waits for modeld.
         model_output = model.run(bufs, transforms, inputs, prepare_only)
     mt2 = time.perf_counter()
+    if getattr(model, 'handovers', 0) != handovers:
+      run_count = 0
+      frame_drop_ratio = 0.
     inference_cpu_ms = (time.thread_time() - inference_cpu_start) * 1000
     model_execution_time = mt2 - mt1
 
