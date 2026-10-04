@@ -476,6 +476,9 @@ def main(demo=False):
       'action_t': np.array([lat_action_t, long_action_t], dtype=np.float32),
     }
 
+    if jetlink_adapter is not None and isinstance(model, jetlink_adapter.CarrotModel):
+      # carrot-jetlink: the joining model's lag rule reads modeld's frame drops
+      model.frame_drop_ratio = frame_drop_ratio
     mt1 = time.perf_counter()
     camera_age_at_run_ms = (time.monotonic() - meta_main.timestamp_eof * 1e-9) * 1000
     inference_cpu_start = time.thread_time()

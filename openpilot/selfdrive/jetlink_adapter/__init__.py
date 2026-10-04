@@ -458,6 +458,10 @@ class SmallModel:
   Reads and writes go through to the model (input_queues, npy, prev_desire,
   vision_input_names, usbgpu)."""
 
+  # what jetlink's joining model reads off the small one that carrot's
+  # ModelState does not carry (sunnypilot's does); jetlink's own defaults
+  DEFAULTS = {'lat_delay': 0.0, 'PLANPLUS_CONTROL': 1.0, 'frame_drop_ratio': 0.0}
+
   def __init__(self, model):
     object.__setattr__(self, '_model', model)
 
@@ -468,7 +472,12 @@ class SmallModel:
     return out
 
   def __getattr__(self, name):
-    return getattr(self._model, name)
+    try:
+      return getattr(self._model, name)
+    except AttributeError:
+      if name in SmallModel.DEFAULTS:
+        return SmallModel.DEFAULTS[name]
+      raise
 
   def __setattr__(self, name, value):
     setattr(self._model, name, value)
