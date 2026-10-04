@@ -9,7 +9,7 @@ from openpilot.common.jetlink_peer import is_mac_peer
 
 LINK_STATUS = Path('/dev/shm/carrot-jetlink.json')
 MODEL_STATUS = Path('/dev/shm/carrot-jetlink-model.json')
-HOST_LABELS = {'jetson': 'jetSON', 'mac': 'MAC'}
+HOST_LABELS = {'jetson': 'jetSON', 'mac': 'MAC', 'phone': 'PHONE'}
 
 
 def _read(path):
@@ -55,7 +55,7 @@ def diagnostics():
     return None
   result = {'label': host_label(saved.get('peer')), 'state': link.get('state', 'disconnected'),
             'severity': 'unknown', 'reason': '', 'addresses': [], 'temp_c': None,
-            'active': bool(model.get('active')), 'fresh': False}
+            'active': bool(model.get('active')), 'fresh': False, 'model': saved.get('model')}
   model_error = str(model.get('error') or '')[:240] if not model.get('active') else ''
   if model_error:
     result.update(severity='error', reason=model_error)

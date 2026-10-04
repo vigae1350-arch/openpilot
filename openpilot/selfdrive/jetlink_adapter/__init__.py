@@ -51,6 +51,7 @@ import os
 import sys
 import tempfile
 import threading
+import time
 from collections import namedtuple
 from pathlib import Path
 
@@ -311,6 +312,7 @@ def main() -> None:
   threading.Thread(target=_mark_stable, name='jetlink-stable', daemon=True).start()
   threading.Thread(target=_build_warp_when_offroad, name='jetlink-warp', daemon=True).start()
   use_our_jetlink()
+  threading.Thread(target=_status_loop, name='jetlink-status', daemon=True).start()
   from jetlink.openpilot.owner import main as run_owner
   run_owner(owner_config())
 
@@ -483,10 +485,63 @@ class SmallModel:
     setattr(self._model, name, value)
 
 
+# carrot's Jetlink badge on the driving screen (openpilot.common.jetlink_status)
+# reads these; carrot's own jetlinkd writes them for a Jetson and is off while
+# the phone link is on, so modeld writes them for the phone
+BADGE_LINK = Path('/dev/shm/carrot-jetlink.json')
+BADGE_MODEL = Path('/dev/shm/carrot-jetlink-model.json')
+BADGE_PERIOD = 0.5
+BADGE_MODEL_NAME = 'Cinque v3'
+_BADGE_STATES = {'running': 'ready', 'ready': 'ready', 'joining': 'connecting', 'retrying': 'loading'}
+
+
+def _write_json(path: Path, value: dict) -> None:
+  tmp = path.with_name(path.name + '.phone.tmp')
+  tmp.write_text(json.dumps(value))
+  os.replace(tmp, path)
+
+
+def publish_badge(joined) -> None:
+  """PHONE (driving on the phone's model), PHONE READY, PHONE WAIT."""
+  now = time.monotonic()
+  state = getattr(joined, 'big_model_state', 'unavailable')
+  _write_json(BADGE_LINK, {'state': _BADGE_STATES.get(state, 'waiting'), 'updated': now, 'writer': 'modeld',
+                           'model': BADGE_MODEL_NAME, 'peer': {'carrot_host': 'phone', 'device': 'phone'}})
+  _write_json(BADGE_MODEL, {'active': state == 'running', 'updated': now})
+
+
+def publish_owner_status(host_present: bool) -> bool:
+  """The owner's view for the web page and the badge whenever modeld is not
+  writing (parked, or modeld not on the joining model): waiting, or ready while
+  a phone holds the gadget. False when modeld's own report is current."""
+  now = time.monotonic()
+  try:
+    current = json.loads(BADGE_LINK.read_text())
+    if current.get('writer') == 'modeld' and 0 <= now - float(current['updated']) < 3 * BADGE_PERIOD:
+      return False
+  except (OSError, ValueError, KeyError, TypeError, AttributeError):
+    pass
+  _write_json(BADGE_LINK, {'state': 'ready' if host_present else 'waiting', 'updated': now, 'writer': 'owner',
+                           'model': BADGE_MODEL_NAME, 'peer': {'carrot_host': 'phone', 'device': 'phone'}})
+  _write_json(BADGE_MODEL, {'active': False, 'updated': now})
+  return True
+
+
+def _status_loop() -> None:
+  from jetlink.comma import gadget
+  while True:
+    try:
+      publish_owner_status(gadget.host_attached())
+    except Exception:
+      pass
+    time.sleep(1.0)
+
+
 class CarrotModel:
   """jetlink's joining model as carrot's modeld drives it."""
 
   usbgpu = False
+  _badge_at = 0.0
 
   def __init__(self, joined):
     object.__setattr__(self, '_joined', joined)
@@ -495,7 +550,15 @@ class CarrotModel:
     # a dropped camera frame: carrot advances the small model's history without
     # publishing. jetlink's models keep their own history per frame sent, so
     # the frame runs and is published as zoompilot's modeld does
-    return self._joined.run(bufs, transforms, inputs)
+    out = self._joined.run(bufs, transforms, inputs)
+    now = time.monotonic()
+    if now >= self._badge_at:
+      object.__setattr__(self, '_badge_at', now + BADGE_PERIOD)
+      try:
+        publish_badge(self._joined)
+      except Exception:
+        pass
+    return out
 
   def __getattr__(self, name):
     return getattr(self._joined, name)

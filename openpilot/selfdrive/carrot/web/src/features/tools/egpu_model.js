@@ -133,7 +133,7 @@ function render(status = lastStatus) {
     card.hidden = false;
     card.dataset.state = host.severity === "error" ? "error" : "compiled";
     card.classList.remove("is-running");
-    document.getElementById("egpuModelTitle").textContent = `${host.label} · Cinque v2`;
+    document.getElementById("egpuModelTitle").textContent = `${host.label} · ${host.model || "Cinque v2"}`;
     stateEl.textContent = t(`host_${host.severity || "unknown"}`);
     detailEl.textContent = "";
     progressEl.hidden = true;
